@@ -146,9 +146,9 @@ def parse_scrip_positions(uploaded_file) -> tuple:
         qty_on_hand = parse_number(row.iloc[4])
         currency = str(row.iloc[6]).strip().upper() if pd.notna(row.iloc[6]) else 'SGD'
         prev_close = parse_number(row.iloc[8])
-        print("current_price_raw  " + str(row.iloc[16]))
+        # print("current_price_raw  " + str(row.iloc[16]))
         current_price = parse_number(row.iloc[16]) if len(row) > 16 else 0
-        print("current_price_after processing  " + str(current_price)) 
+        # print("current_price_after processing  " + str(current_price)) 
         # Unsettled positions
         unsettled_purch = parse_number(row.iloc[13]) if len(row) > 13 else 0
         unsettled_sales = parse_number(row.iloc[14]) if len(row) > 14 else 0
@@ -232,13 +232,13 @@ def calculate_margin(positions: list, net_amount: float, credit_limit: float, fx
     for pos in positions:
         grade_info = get_grade_info(pos['grade'])
         fx = fx_rates.get(pos['currency'], 1.0)
-        print("fx" + str(fx))
+        # print("fx" + str(fx))
         mv_local = pos['effective_qty'] * pos['price_used']
-        print("effective qty" + str(pos['effective_qty']))
-        print("ystd price" + str(pos['current_price']))
-        print("mv_local" + str(mv_local))
+        # print("effective qty" + str(pos['effective_qty']))
+        # print("ystd price" + str(pos['current_price']))
+        # print("mv_local" + str(mv_local))
         mv_sgd = mv_local * fx
-        print("market value based on yesterday price" + str(mv_sgd))
+        # print("market value based on yesterday price" + str(mv_sgd))
     
         im_sgd = mv_sgd * grade_info['im']
         mm_sgd = mv_sgd * grade_info['mm']
