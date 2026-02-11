@@ -28,9 +28,13 @@ FX rate timing differences and rounding.
 Run: streamlit run margin_calculator.py
 """
 
+"""
+Phillip Securities Margin Calculator
+...
+"""
+
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 # =============================================================================
 # REFERENCE DATA (from REFERENCE sheet)
@@ -233,7 +237,7 @@ def calculate_margin(positions: list, net_amount: float, credit_limit: float, fx
         grade_info = get_grade_info(pos['grade'])
         fx = fx_rates.get(pos['currency'], 1.0)
         # print("fx" + str(fx))
-        mv_local = pos['effective_qty'] * pos['price_used']
+        mv_local = pos['effective_qty'] * pos['current_price']
         # print("effective qty" + str(pos['effective_qty']))
         # print("ystd price" + str(pos['current_price']))
         # print("mv_local" + str(mv_local))
@@ -273,28 +277,28 @@ def calculate_margin(positions: list, net_amount: float, credit_limit: float, fx
     fm_ratio = total_fm / total_pv if total_pv > 0 else 0 
     
     # Lowest PV before Margin Call: -Net Amount / (1 - MM Ratio)
-    if mm_ratio < 1 and net_amount < 0:
-        lowest_pv_before_mc = -net_amount / (1 - mm_ratio) 
-    else:
-        lowest_pv_before_mc = 0
+    # if mm_ratio < 1 and net_amount < 0:
+    lowest_pv_before_mc = -net_amount / (1 - mm_ratio) 
+    # else:
+        # lowest_pv_before_mc = 0
     
     # Max % drop before margin call
-    if total_pv > 0 and lowest_pv_before_mc > 0:
-        max_drop_before_mc = (total_pv - lowest_pv_before_mc) / total_pv  
-    else:
-        max_drop_before_mc = 0
+    # if total_pv > 0 and lowest_pv_before_mc > 0:
+    max_drop_before_mc = (total_pv - lowest_pv_before_mc) / total_pv  
+    # else:
+        # max_drop_before_mc = 0
     
     # Lowest PV before Force Sell: -Net Amount / (1 - FM Ratio)
-    if fm_ratio < 1 and net_amount < 0:
-        lowest_pv_before_fs = -net_amount / (1 - fm_ratio)  
-    else:
-        lowest_pv_before_fs = 0
+    # if fm_ratio < 1 and net_amount < 0:
+    lowest_pv_before_fs = -net_amount / (1 - fm_ratio)  
+    # else:
+    #     lowest_pv_before_fs = 0
     
     # Max % drop before force sell
-    if total_pv > 0 and lowest_pv_before_fs > 0:
-        max_drop_before_fs = (total_pv - lowest_pv_before_fs) / total_pv  
-    else:
-        max_drop_before_fs = 0
+    # if total_pv > 0 and lowest_pv_before_fs > 0:
+    max_drop_before_fs = (total_pv - lowest_pv_before_fs) / total_pv  
+    # else:
+        # max_drop_before_fs = 0
     
     return {
         'positions': calc_positions,
@@ -393,6 +397,16 @@ def simulate_transfer(calc: dict, transfers: list, fx_rates: dict) -> dict:
         'is_margin_call': is_margin_call,
     }
 
+def to_yf_ticker(code: str, section: str) -> str:
+    code = code.strip()
+    if section == 'SG':
+        return f"{code}.SI"
+    elif section == 'HK':
+        return f"{code.zfill(4)}.HK"
+    elif section == 'US':
+        return code
+    return code
+
 
 # =============================================================================
 # STREAMLIT APP
@@ -444,8 +458,8 @@ def main():
                 bonds = len([p for p in positions if p['type'] == 'Bond'])
                 st.caption(f"Equities: {equities} | Bonds: {bonds}")
         
-        st.divider()
-        
+                st.divider()
+       
         # ==========================================================================
         # NET AMOUNT INPUT
         # ==========================================================================
@@ -541,26 +555,23 @@ def main():
     elif calc['credit_capped']:
         st.warning(f"⚡ **CREDIT LIMIT CAPPED** — Max Purchase: **S${calc['available_buy_limit']:,.2f}**")
     else:
-        st.success(f"✅ **NO MARGIN CALL** — Usable Cash: **S${calc['usable_cash']:,.2f}**")
+        st.success(f"✅ **NO MARGIN CALL** — Available Cash (w/o Margin) Cash: **S${calc['usable_cash']:,.2f}**")
     
     # ==========================================================================
     # ACCOUNT SUMMARY
     # ==========================================================================
     st.subheader("📊 Account Summary")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col3 = st.columns(2)
     
     with col1:
         st.metric("Portfolio Value", f"S${calc['total_pv']:,.2f}")
         st.metric("Initial Margin", f"S${calc['total_im']:,.2f}")
     
-    with col2:
-        st.metric("Maintenance Margin", f"S${calc['total_mm']:,.2f}")
-        st.metric("Force-sell Margin", f"S${calc['total_fm']:,.2f}")
     
     with col3:
-        st.metric("Usable Cash", f"S${calc['usable_cash']:,.2f}")
-        st.metric("Buying Power", f"S${calc['buying_power']:,.2f}")
+        st.metric("Available Cash (w/o Margin)", f"S${calc['usable_cash']:,.2f}")
+        st.metric("Available Cash or Buying Power (with Margin)", f"S${calc['buying_power']:,.2f}")
     
     # ==========================================================================
     # POSITIONS TABLE
@@ -572,12 +583,12 @@ def main():
         
         display_df = pos_df[[
             'type', 'name', 'code', 'grade', 'effective_qty', 
-            'prev_close', 'currency', 'mv_sgd', 'im_sgd', 'mm_sgd'
+            'prev_close', 'currency', 'mv_sgd'
         ]].copy()
         
         display_df.columns = [
             'Type', 'Name', 'Code', 'Grade', 'Qty', 
-            'Prev Close', 'Curr', 'MV (SGD)', 'IM (SGD)', 'MM (SGD)'
+            'Prev Close', 'Curr', 'MV (SGD)'
         ]
         
         display_df['Grade'] = display_df['Grade'].apply(lambda x: f"{x}%")
@@ -587,8 +598,7 @@ def main():
                 'Qty': '{:,.0f}',
                 'Prev Close': '{:.4f}',
                 'MV (SGD)': 'S${:,.2f}',
-                'IM (SGD)': 'S${:,.2f}',
-                'MM (SGD)': 'S${:,.2f}',
+            
             }),
             use_container_width=True,
             hide_index=True
@@ -615,7 +625,10 @@ def main():
             st.markdown("**Minimum Market Value of Shares to Sell (by Grade):**")
             
             sell_data = []
+            
             for grade_pct, info in sorted(GRADES.items(), reverse=True):
+                print(str(info['sell']))
+              
                 sell_amt = calc['margin_call_amount'] * info['sell']
                 sell_data.append({
                     'Grade': info['name'],
@@ -653,13 +666,17 @@ def main():
                 total_im_released = 0
                 
                 for sel in sell_selections:
+                    print("sell variable posiiton" + ' '  + str(sel['position']))
+                    print("sell variable quantity" + ' '  + str(sel['qty']))
                     pos = sel['position']
                     qty = sel['qty']
                     grade_info = get_grade_info(pos['grade'])
                     fx = st.session_state.fx_rates.get(pos['currency'], 1.0)
                     
                     proceeds = qty * pos['current_price'] * fx
-                    im_released = proceeds * grade_info['im']
+
+                    print("proceed variable" + " " + str(proceeds))
+                    im_released = proceeds * (1-grade_info['im'])
                     effective_release = proceeds / grade_info['sell']  # How much MC it covers
                     
                     total_sell_proceeds += proceeds
@@ -698,38 +715,35 @@ def main():
         # ==========================================================================
         
         # How far to margin call
-        st.subheader("📉 Distance to Margin Call")
-        
         col1, col2 = st.columns(2)
-        
         with col1:
-            if calc['max_drop_before_mc'] > 0:
-                st.metric(
-                    "Max % Drop Before Margin Call",
-                    f"{calc['max_drop_before_mc']*100:.2f}%"
-                )
-                st.metric(
-                    "Lowest PV Before Margin Call",
-                    f"S${calc['lowest_pv_before_mc']:,.2f}"
-                )
-            elif st.session_state.net_amount >= 0:
-                st.info("💡 No margin call risk - Net Amount is positive")
-            else:
-                st.info("💡 Portfolio can drop significantly before margin call")
-        
+            st.subheader("📉 Distance to Margin Call")
+
+
+            st.markdown(f"""
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Margin Call</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_mc']*100:.2f}%</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before margin call)</p>
+                        
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Portfolio Value Before Margin Call</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_mc']:,.2f}</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before margin call)</p>
+                    """, unsafe_allow_html=True)
+            
         with col2:
-            if calc['max_drop_before_fs'] > 0:
-                st.metric(
-                    "Max % Drop Before Force Sell",
-                    f"{calc['max_drop_before_fs']*100:.2f}%"
-                )
-                st.metric(
-                    "Lowest PV Before Force Sell",
-                    f"S${calc['lowest_pv_before_fs']:,.2f}"
-                )
-        
+            st.subheader("📉 Distance to Force Sell")
+
+            st.markdown(f"""
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Force Sell</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_fs']*100:.2f}%</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before force sell)</p>
+                        
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Potfolio Value Before Force Sell</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_fs']:,.2f}</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before force sell)</p>
+                    """, unsafe_allow_html=True)
+
         st.divider()
-        
         # ==========================================================================
         # PURCHASE CAPACITY
         # ==========================================================================
@@ -738,7 +752,7 @@ def main():
         if calc['credit_capped']:
             st.warning(f"⚠️ You are capped by credit limit. Max purchase: S${calc['available_buy_limit']:,.2f}")
         
-        st.markdown("**Maximum Purchase by Grade (with current Usable Cash):**")
+        st.markdown("**Maximum Purchase by Grade (with Current Available Cash):**")
         
         base_cash = max(0, calc['usable_cash'])
         purchase_data = []
@@ -792,13 +806,13 @@ def main():
                 st.info("Enter purchase amounts to simulate")
             elif result['is_margin_call']:
                 st.error(f"❌ Cannot Buy - Margin Call will be triggered!")
-                st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
+                st.caption(f"New Available Cash (w/o Margin) Cash would be: S${result['new_usable_cash']:,.2f}")
             elif result['exceeds_credit']:
                 st.warning(f"⚠️ You have sufficient buying power but will exceed Credit Limit!")
                 st.caption(f"Total purchase: S${result['total_purchase']:,.2f} > Limit: S${calc['available_buy_limit']:,.2f}")
             else:
                 st.success(f"✅ You can purchase these shares!")
-                st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
+                st.caption(f"New Available Cash (w/o Margin) Cash would be: S${result['new_usable_cash']:,.2f}")
         
         st.divider()
         
@@ -834,10 +848,10 @@ def main():
                 
                 if result['is_margin_call']:
                     st.error(f"❌ Cannot Transfer - Margin Call will be triggered!")
-                    st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
+                    st.caption(f"New Available Cash (w/o Margin) Cash would be: S${result['new_usable_cash']:,.2f}")
                 else:
                     st.success(f"✅ Safe to Transfer!")
-                    st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
+                    st.caption(f"New Available Cash (w/o Margin) Cash would be: S${result['new_usable_cash']:,.2f}")
     
 
 
