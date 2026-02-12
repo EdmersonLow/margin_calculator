@@ -587,11 +587,7 @@ def main():
     if calc['special_positions']:
         st.divider()
         st.subheader("⚡ Special Financing Counters")
-        st.caption(
-            "These positions have a **Grade C** classification but carry non-zero collateral "
-            "in Phillip's system. The app uses the **file's actual collateral** instead of "
-            "the grade-based calculation for accuracy."
-        )
+       
         
         special_data = []
         for sp in calc['special_positions']:
