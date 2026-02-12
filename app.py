@@ -411,7 +411,7 @@ def main():
     st.set_page_config(page_title="Phillip Margin Calculator", page_icon="📊", layout="wide")
     
     st.title("📊 Phillip Securities Margin Calculator")
-    st.caption("Cash Plus / Margin Account • Includes Equities + Bonds • Excludes Unit Trusts • Uses Prev Day Close Price")
+    st.caption("Cash Plus / Margin Account and Share Financing Account • Includes Equities + Bonds • Excludes Unit Trusts • Uses Prev Day Close Price")
     
     # Initialize session state
     for key, default in [
@@ -566,9 +566,7 @@ def main():
                 'Actual Financing': f"{actual_fin*100:.0f}%",
                 'MV (Local)': f"{sp['currency']} {sp['mv_local']:,.2f}",
                 'Expected Collateral': f"S${sp['mv_local'] * expected_fin:,.2f}",
-                'Actual Collateral (File)': f"S${sp['collateral_file']:,.2f}",
-                'Collateral Used (SGD)': f"S${sp['collateral_sgd']:,.2f}",
-                'IM Used (SGD)': f"S${sp['im_sgd']:,.2f}",
+                'Actual Collateral': f"S${sp['collateral_file']:,.2f}",
             })
         
         st.dataframe(
@@ -748,8 +746,10 @@ def main():
                 
                 proceeds_local = qty * price
                 proceeds_sgd = proceeds_local * fx
-                im_rel = proceeds_sgd * (1 - grade_info['im'])
-                mm_rel = proceeds_sgd * (1 - grade_info['im'])
+                print(proceeds_sgd)
+                im_rel = proceeds_sgd * (grade_info['im'])
+                print(im_rel)
+                mm_rel = proceeds_sgd * (grade_info['im'])
                 
                 total_sell_sgd += im_rel
                 total_im_released += im_rel
@@ -759,7 +759,8 @@ def main():
                     'Counter': f"{pos['name']} ({pos['code']})",
                     'Qty': f"{qty:,}",
                     'Sell Price': f"{pos['currency']} {price:.4f}",
-                    'Proceeds (SGD)': f"S${proceeds_sgd:,.2f}",
+                    'Grade Info': f"{grade_info["name"]}",
+                    'Proceeds (SGD)': f"S${im_rel:,.2f}",
                 })
             
             if sell_breakdown:
@@ -771,7 +772,7 @@ def main():
             new_im = calc['total_im'] - total_im_released
             new_mm = calc['total_mm'] - total_mm_released
             new_net = st.session_state.net_amount + total_sell_sgd + cash_deposit
-            new_usable_cash = new_pv + new_net
+            new_usable_cash = new_pv + new_net -new_im
             new_mc_amount = -(new_pv - new_mm + new_net) if new_usable_cash < 0 else 0
             
             st.divider()
