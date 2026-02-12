@@ -84,34 +84,47 @@ def get_nearest_grade(grade_pct: int) -> int:
     return min(levels, key=lambda x: abs(x - grade_pct))
 
 
-def detect_special_financing(grade_pct: int, mv_local: float, collateral_file: float) -> dict:
+def detect_special_financing(grade_pct: int, prev_close: float, total_qty: int,
+                             collateral_file: float = 0, im_file: float = 0,
+                             is_v_account: bool = False) -> dict:
     """
-    Compare grade-based expected collateral vs actual collateral from file.
+    Exact check for special financing.
     
-    Returns:
-        dict with 'is_special', 'expected_financing', 'actual_financing',
-        'expected_collateral', 'actual_collateral'
+    V Account:      Grade% × Prev_Close × Qty ≠ Collateral
+    Margin/CashPlus: (1 - Grade%) × Prev_Close × Qty ≠ IM
     """
     nearest = get_nearest_grade(grade_pct)
-    expected_financing = GRADE_FINANCING[nearest]
-    expected_collateral = mv_local * expected_financing
-    
-    # Tolerance: 0.1% of MV or $1, whichever is larger
-    tolerance = max(1.0, mv_local * 0.001)
-    
-    is_special = abs(expected_collateral - collateral_file) > tolerance
-    
-    actual_financing = collateral_file / mv_local if mv_local > 0 else 0.0
-    
+    financing_pct = GRADE_FINANCING[nearest]  # e.g. 80% for Grade S
+    im_rate = 1 - financing_pct               # e.g. 20% for Grade S
+    mv_local = prev_close * total_qty
+
+    if is_v_account:
+        expected = financing_pct * mv_local       # expected collateral
+        actual = collateral_file
+    else:
+        expected = im_rate * mv_local             # expected IM
+        actual = im_file
+
+    is_special = round(expected, 2) != round(actual, 2) and actual > 0
+
+    # Derive actual financing %
+    if mv_local > 0:
+        if is_v_account:
+            actual_financing = actual / mv_local          # collateral / MV
+        else:
+            actual_financing = 1 - (actual / mv_local)    # 1 - (IM / MV)
+    else:
+        actual_financing = 0.0
+
     return {
         'is_special': is_special,
         'grade_shown': nearest,
-        'expected_financing': expected_financing,
+        'expected_financing': financing_pct,
         'actual_financing': actual_financing,
-        'expected_collateral': expected_collateral,
-        'actual_collateral': collateral_file,
+        'expected_value': expected,
+        'actual_value': actual,
+        'check_type': 'collateral' if is_v_account else 'IM',
     }
-
 
 def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
     """
@@ -169,9 +182,8 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
         unsettled_purch = parse_number(row.iloc[13]) if len(row) > 13 else 0
         unsettled_sales = parse_number(row.iloc[14]) if len(row) > 14 else 0
         
-        # Collateral from file (column 11) — used for special financing detection
-        collateral_file = parse_number(row.iloc[11]) if len(row) > 11 else 0
-        
+        # Parse: one column, one variable
+        margin_col_value = parse_number(row.iloc[11]) if len(row) > 11 else 0
         if is_v_account:
             effective_qty = qty_on_hand
         else:
@@ -180,20 +192,22 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
         if effective_qty <= 0:
             continue
         
+        # Detect: pass same value to both params
+        special_info = detect_special_financing(
+            grade_pct=grade,
+            prev_close=prev_close,
+            total_qty=int(effective_qty),
+            collateral_file=margin_col_value if is_v_account else 0,
+            im_file=margin_col_value if not is_v_account else 0,
+            is_v_account=is_v_account,
+        )
+        
         price = prev_close
         if price <= 0:
             continue
         
         currencies.add(currency)
-        
-        # Market value in local currency
-        mv_local = effective_qty * prev_close
-        
-        # Detect special financing (V Account only)
-        special_info = {'is_special': False}
-        if is_v_account:
-            special_info = detect_special_financing(grade, mv_local, collateral_file)
-        
+    
         positions.append({
             'section': current_section,
             'type': 'Bond' if is_bond_section else 'Equity',
@@ -208,7 +222,7 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
             'prev_close': prev_close,
             'current_price': current_price if current_price > 0 else prev_close,
             'price_used': price,
-            'collateral_file': collateral_file,
+            'margin_col_value': margin_col_value,
             'is_special_financing': special_info['is_special'],
             'actual_financing_pct': special_info.get('actual_financing', 0),
             'expected_financing_pct': special_info.get('expected_financing', 0),
@@ -256,14 +270,16 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
         mv_local = pos['effective_qty'] * adjusted_price
         mv_sgd = mv_local * fx
         
-        if is_v_account and pos['is_special_financing']:
+        if pos['is_special_financing']:
             # --- SPECIAL FINANCING: use file's collateral ---
-            collateral_sgd = pos['collateral_file'] * fx
+            collateral_sgd = pos['margin_col_value'] * fx
             actual_fin = pos['actual_financing_pct']
             
             # IM = MV - Collateral (i.e., im_rate = 1 - actual_financing)
-            im_rate = 1.0 - actual_fin
-            im_sgd = mv_sgd * im_rate
+            if is_v_account:
+                im_sgd = mv_sgd - (pos['margin_col_value'] * fx)
+            else:
+                im_sgd = pos['margin_col_value'] * fx
             mm_sgd = im_sgd  # MM = IM for special (conservative)
             
             # FM: derive proportionally. If actual financing maps to a known grade, use it.
@@ -273,7 +289,7 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
                 fm_ratio_factor = grade_info['fm'] / grade_info['im']
             else:
                 fm_ratio_factor = 1.0
-            fm_sgd = mv_sgd * im_rate * fm_ratio_factor
+            fm_sgd = mv_sgd  * fm_ratio_factor
             
             special_positions.append({
                 **pos,
@@ -591,7 +607,7 @@ def main():
                 'Actual Financing': f"{actual_fin*100:.0f}%",
                 'MV (Local)': f"{sp['currency']} {sp['mv_local']:,.2f}",
                 'Expected Collateral': f"S${sp['mv_local'] * expected_fin:,.2f}",
-                'Actual Collateral': f"S${sp['collateral_file']:,.2f}",
+                'Actual Collateral': f"S${sp['margin_col_value']:,.2f}",
             })
         
         st.dataframe(
