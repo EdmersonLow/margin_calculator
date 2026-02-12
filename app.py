@@ -217,7 +217,7 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
     return positions, currencies
 
 
-def calculate_margin(positions: list, net_amount: float, credit_limit: float,
+def calculate_margin(price_change_pct: float, positions: list, net_amount: float, credit_limit: float,
                      fx_rates: dict, is_v_account: bool = False) -> dict:
     """
     Calculate margin status using VBA formulas.
@@ -252,7 +252,8 @@ def calculate_margin(positions: list, net_amount: float, credit_limit: float,
     
     for pos in positions:
         fx = fx_rates.get(pos['currency'], 1.0)
-        mv_local = pos['effective_qty'] * pos['price_used']
+        adjusted_price = pos['price_used'] * (1 + price_change_pct / 100)
+        mv_local = pos['effective_qty'] * adjusted_price
         mv_sgd = mv_local * fx
         
         if is_v_account and pos['is_special_financing']:
@@ -415,6 +416,7 @@ def main():
     
     # Initialize session state
     for key, default in [
+        ('price_change_pct', 0.0),
         ('positions', []), ('currencies', set()),
         ('fx_rates', DEFAULT_FX.copy()),
         ('net_amount', 0.0), ('credit_limit', 100000.0),
@@ -483,7 +485,29 @@ def main():
                 st.session_state.fx_rates[curr] = st.number_input(
                     f"{curr}/SGD", value=default_rate,
                     min_value=0.0001, step=0.0001, format="%.4f", key=f"fx_{curr}")
-    
+        st.divider()
+
+        st.subheader("⚡ Stress Test")
+        st.caption(f"Current: **{st.session_state.price_change_pct:+.0f}%**")
+
+        col_down, col_up = st.columns(2)
+        with col_down:
+            st.markdown("**📉 Drop**")
+            for pct in [-5, -10, -20]:
+                if st.button(f"{pct}%", key=f"stress_{pct}", use_container_width=True):
+                    st.session_state.price_change_pct = float(pct)
+        with col_up:
+            st.markdown("**📈 Rise**")
+            for pct in [5, 10, 20]:
+                if st.button(f"+{pct}%", key=f"stress_{pct}", use_container_width=True):
+                    st.session_state.price_change_pct = float(pct)
+
+        if st.button("🔄 Reset to 0%", use_container_width=True):
+            st.session_state.price_change_pct = 0.0
+            
+        color = "#ef4444" if st.session_state.price_change_pct < 0 else "#22c55e" if st.session_state.price_change_pct > 0 else "#64748b"
+        st.markdown(f"<p style='font-size:28px; font-weight:bold; text-align:center; color:{color};'>{st.session_state.price_change_pct:+.0f}%</p>", unsafe_allow_html=True)
+
     # ==========================================================================
     # MAIN CONTENT
     # ==========================================================================
@@ -492,6 +516,7 @@ def main():
         return
     
     calc = calculate_margin(
+        st.session_state.price_change_pct,
         st.session_state.positions,
         st.session_state.net_amount,
         st.session_state.credit_limit,
