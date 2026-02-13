@@ -616,8 +616,8 @@ def main():
                 'Expected Financing': f"{expected_fin*100:.0f}%",
                 'Actual Financing': f"{actual_fin*100:.0f}%",
                 'MV (Local)': f"{sp['currency']} {sp['mv_local']:,.2f}",
-                'Expected Collateral': f"S${sp['mv_local'] * expected_fin:,.2f}",
-                'Actual Collateral': f"S${sp['margin_col_value']:,.2f}",
+                'Expected Collateral': f"{sp['currency']} {sp['mv_local'] * expected_fin:,.2f}",
+                'Actual Collateral': f"{sp['currency']} {sp['margin_col_value']:,.2f}",
             })
         
         st.dataframe(
