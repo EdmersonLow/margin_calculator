@@ -104,18 +104,22 @@ def detect_special_financing(grade_pct: int, prev_close: float, total_qty: int,
     else:
         expected = im_rate * mv_local             # expected IM
         actual = im_file
-    print("Expected:", expected)
-    print("Actual:", actual)
     
     # Calculate actual financing percentage
     actual_financing_pct = 0.0
     if mv_local > 0:
         if is_v_account:
-            actual_financing_pct = round(actual / mv_local,0)          # collateral / MV
+            actual_financing_pct = round((actual / mv_local)*100,0)
+            print("actual financing pct " ,str(actual_financing_pct))  
+            print("actual financing pct without rounding" ,str(actual / mv_local))          # collateral / MV
+                    # collateral / MV
         else:
-            actual_financing_pct = round(1 - (actual / mv_local),0)   # 1 - (IM / MV)
+            print(1 - (actual / mv_local))
+
+            actual_financing_pct = round((1 - (actual / mv_local))*100,0)   # 1 - (IM / MV)
     
     # Compare financing percentages with tolerance
+    print("expected financing pct ", str(financing_pct))
     expected_financing_pct = round(financing_pct, 0)  # Same expected financing % for both account types, rounded to integer
     tolerance = 1.0  # 1 unit tolerance for integer percentages
     diff = abs(expected_financing_pct - actual_financing_pct)
@@ -126,9 +130,7 @@ def detect_special_financing(grade_pct: int, prev_close: float, total_qty: int,
     
     # Not special if the absolute difference is very small
     is_special = (diff > tolerance) and (absolute_diff > absolute_tolerance) and actual > 0
-    print("Expected financing %:", expected_financing_pct)
-    print("Actual financing %:", actual_financing_pct)
-    print("Is Special:", is_special)
+
 
     return {
         'is_special': is_special,
@@ -201,20 +203,24 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
         if is_v_account:
             effective_qty = qty_on_hand
         else:
+            if qty_on_hand == 0:
+                continue
             effective_qty = qty_on_hand + unsettled_purch + unsettled_sales
+    
         
         if effective_qty <= 0:
             continue
-        
-        # Detect: pass same value to both params
-        special_info = detect_special_financing(
-            grade_pct=grade,
-            prev_close=prev_close,
-            total_qty=int(effective_qty),
-            collateral_file=margin_col_value if is_v_account else 0,
-            im_file=margin_col_value if not is_v_account else 0,
-            is_v_account=is_v_account,
-        )
+        special_info = None
+        mv = current_price * effective_qty 
+        if effective_qty and mv != 0:
+            special_info = detect_special_financing(
+        grade_pct=grade,
+        prev_close=prev_close, 
+        total_qty=int(effective_qty),
+        collateral_file=margin_col_value if is_v_account else 0,
+        im_file=margin_col_value if not is_v_account else 0,
+        is_v_account=is_v_account,
+    )
         
         price = prev_close
         if price <= 0:
