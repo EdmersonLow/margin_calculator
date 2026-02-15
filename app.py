@@ -25,6 +25,7 @@ VBA FORMULAS:
 Run: streamlit run margin_app.py
 """
 
+from re import S
 import streamlit as st
 import pandas as pd
 
@@ -203,8 +204,6 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
         if is_v_account:
             effective_qty = qty_on_hand
         else:
-            if qty_on_hand == 0:
-                continue
             effective_qty = qty_on_hand + unsettled_purch + unsettled_sales
     
         
@@ -520,7 +519,7 @@ def main():
                 default_rate = st.session_state.fx_rates.get(curr, DEFAULT_FX.get(curr, 1.0))
                 st.session_state.fx_rates[curr] = st.number_input(
                     f"{curr}/SGD", value=default_rate,
-                    min_value=0.0001, step=0.0001, format="%.4f", key=f"fx_{curr}")
+                    min_value=0.0001, step=0.0001, format="%.7f", key=f"fx_{curr}")
         st.divider()
 
         st.subheader("⚡ Stress Test")
@@ -638,10 +637,16 @@ def main():
             sp['collateral_sgd'] - sp['mv_local'] * GRADE_FINANCING[get_nearest_grade(sp['grade'])] * st.session_state.fx_rates.get(sp['currency'], 1.0)
             for sp in calc['special_positions']
         )
+
         st.info(
             f"💡 **Impact**: Special financing adds **S${total_col_diff:,.2f}** more collateral "
             f"than the grade alone would give. Without this adjustment, the margin call would "
             f"be overstated."
+        )
+        
+        st.info (
+            f"Special financing reduces the collateral the client needs to maintain the position."
+            f"Without it, based on the counter's grading, the client would need an additional **S${total_col_diff:,.2f}** in collateral, and the margin call would be higher."
         )
     
     st.divider()
@@ -726,7 +731,7 @@ def main():
                 remaining_mc = calc['margin_call_amount'] - total_sell_proceeds + total_im_released
                 
                 if remaining_mc <= 0:
-                    st.success(f"✅ Margin Call FULFILLED! Selling releases S${total_sell_proceeds:,.2f}")
+                    st.success(f"✅ **Margin Call FULFILLED!** Client now has usable cash of **S${new_usable_cash:,.2f}**")
                 else:
                     st.error(f"❌ Need to sell more! Remaining MC: S${remaining_mc:,.2f}")
         
@@ -817,7 +822,7 @@ def main():
                     'Qty': f"{qty:,}",
                     'Sell Price': f"{pos['currency']} {price:.4f}",
                     'Grade Info': f"{grade_info["name"]}",
-                    'Proceeds (SGD)': f"S${im_rel:,.2f}",
+                    'Settlement (SGD)': f"S${im_rel:,.2f}",
                 })
             
             if sell_breakdown:
@@ -840,50 +845,52 @@ def main():
             s3.metric("Total Settlement", f"S${cash_deposit + total_sell_sgd:,.2f}")
             
             if new_usable_cash >= 0:
-                st.success(f"✅ **Margin Call FULFILLED!** New Usable Cash: S${new_usable_cash:,.2f}")
+                st.success(f"✅ **Margin Call FULFILLED!** Client now has usable cash of **S${new_usable_cash:,.2f}**")
             else:
                 st.error(f"❌ **Margin Call NOT fulfilled.** Remaining MC Amount: S${new_mc_amount:,.2f}")
-                st.caption(f"New Usable Cash: S${new_usable_cash:,.2f}")
     
     else:
         # ==================================================================
         # NO MARGIN CALL
         # ==================================================================
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📉 Distance to Margin Call")
-            if st.session_state.net_amount >= 0:
-                st.info("💡 No margin call possible — Net Amount is positive")
-            elif calc['mm_ratio'] >= 1:
-                st.info("💡 Portfolio is 100% Grade C — no margin call as long as Net Amount is positive")
-            else:
-                st.markdown(f"""
-                    <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Margin Call</p>
-                    <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_mc']*100:.2f}%</p>
-                    <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before margin call)</p>
-                    <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Portfolio Value Before Margin Call</p>
-                    <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_mc']:,.2f}</p>
-                    <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before margin call)</p>
-                """, unsafe_allow_html=True)
-        
-        with col2:
-            st.subheader("📉 Distance to Force Sell")
-            if st.session_state.net_amount >= 0:
-                st.info("💡 No force sell possible — Net Amount is positive")
-            elif calc['fm_ratio'] >= 1:
-                st.info("💡 Portfolio is 100% Grade C — no force sell as long as Net Amount is positive")
-            else:
-                st.markdown(f"""
-                    <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Force Sell</p>
-                    <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_fs']*100:.2f}%</p>
-                    <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before force sell)</p>
-                    <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Portfolio Value Before Force Sell</p>
-                    <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_fs']:,.2f}</p>
-                    <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before force sell)</p>
-                """, unsafe_allow_html=True)
-        
-        st.divider()
+        is_special_financing = any(p.get('is_special_financing') for p in calc['positions'])
+        if is_special_financing:
+            st.subheader("💡 Disclaimer for TR, Check with Back Office for more details on Margin Call / Force Selling!")
+        else: 
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("📉 Distance to Margin Call")
+                if st.session_state.net_amount >= 0:
+                    st.info("💡 No margin call possible — Net Amount is positive")
+                elif calc['mm_ratio'] >= 1:
+                    st.info("💡 Portfolio is 100% Grade C — no margin call as long as Net Amount is positive")
+                else:
+                    st.markdown(f"""
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Margin Call</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_mc']*100:.2f}%</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before margin call)</p>
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Portfolio Value Before Margin Call</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_mc']:,.2f}</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before margin call)</p>
+                    """, unsafe_allow_html=True)
+            
+            with col2:
+                st.subheader("📉 Distance to Force Sell")
+                if st.session_state.net_amount >= 0:
+                    st.info("💡 No force sell possible — Net Amount is positive")
+                elif calc['fm_ratio'] >= 1:
+                    st.info("💡 Portfolio is 100% Grade C — no force sell as long as Net Amount is positive")
+                else:
+                    st.markdown(f"""
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Max % Drop Before Force Sell</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>{calc['max_drop_before_fs']*100:.2f}%</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(Max % current portfolio can drop before force sell)</p>
+                        <p style='font-size:16px; font-weight:bold; margin-bottom:0;'>Lowest Portfolio Value Before Force Sell</p>
+                        <p style='font-size:36px; font-weight:bold; margin-top:0; margin-bottom:0;'>S${calc['lowest_pv_before_fs']:,.2f}</p>
+                        <p style='font-size:13px; font-style:italic; color:gray; margin-top:0;'>(The lowest value the portfolio can reach before force sell)</p>
+                    """, unsafe_allow_html=True)
+            
+            st.divider()
         
         # PURCHASE CAPACITY
         st.subheader("💰 Purchase Capacity")
