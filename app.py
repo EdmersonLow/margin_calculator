@@ -19,7 +19,7 @@ VBA FORMULAS:
 - Usable Cash (O12) = Portfolio Value - IM + Net Amount
 - Margin Call? (O8) = IF(Usable Cash < 0, "Yes", "No")
 - Margin Call Amount (O9) = -(Portfolio Value - MM + Net Amount)
-- Available Buy Limit (O15) = Net Amount + Credit Limit
+- Available Buy Limit (O15) = Net Amount + Credit LimitR
 - Buying Power (O18) = MIN(Usable Cash, Available Buy Limit)
 
 Run: streamlit run margin_app.py
@@ -211,22 +211,27 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
             continue
         special_info = None
         # mv = current_price * effective_qty 
-        if effective_qty :
-            special_info = detect_special_financing(
-        grade_pct=grade,
-        prev_close=prev_close, 
-        total_qty=int(effective_qty),
-        collateral_file=margin_col_value if is_v_account else 0,
-        im_file=margin_col_value if not is_v_account else 0,
-        is_v_account=is_v_account,
-    )
+        
+        print(is_bond_section)
+        
+      
+        if effective_qty  :
+                special_info = detect_special_financing(
+            grade_pct=grade,
+            prev_close=prev_close, 
+            total_qty=int(effective_qty),
+            collateral_file=margin_col_value if is_v_account else 0,
+            im_file=margin_col_value if not is_v_account else 0,
+            is_v_account=is_v_account,
+        )
         
         price = prev_close
         if price <= 0:
             continue
-        
+
         currencies.add(currency)
-    
+        if is_bond_section:
+            special_info['is_special'] = False
         positions.append({
             'section': current_section,
             'type': 'Bond' if is_bond_section else 'Equity',
