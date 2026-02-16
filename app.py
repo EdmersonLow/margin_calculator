@@ -210,8 +210,8 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
         if effective_qty <= 0:
             continue
         special_info = None
-        mv = current_price * effective_qty 
-        if effective_qty and mv != 0:
+        # mv = current_price * effective_qty 
+        if effective_qty :
             special_info = detect_special_financing(
         grade_pct=grade,
         prev_close=prev_close, 
@@ -312,7 +312,7 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
             
             special_positions.append({
                 **pos,
-                'grade_name': f"Special ({actual_fin*100:.0f}%)",
+                'grade_name': f"Special ({actual_fin:.0f}%)",
                 'fx_rate': fx,
                 'mv_local': mv_local,
                 'mv_sgd': mv_sgd,
@@ -324,7 +324,7 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
             
             calc_pos = {
                 **pos,
-                'grade_name': f"Special ({actual_fin*100:.0f}%)",
+                'grade_name': f"Special ({actual_fin:.0f}%)",
                 'fx_rate': fx,
                 'mv_local': mv_local,
                 'mv_sgd': mv_sgd,
@@ -619,7 +619,7 @@ def main():
                 'Code': sp['code'],
                 'Grade (Shown)': f"{sp['grade']}% ({GRADES[expected_grade]['name']})",
                 'Expected Financing': f"{expected_fin*100:.0f}%",
-                'Actual Financing': f"{actual_fin*100:.0f}%",
+                'Actual Financing': f"{actual_fin:.0f}%",
                 'MV (Local)': f"{sp['currency']} {sp['mv_local']:,.2f}",
                 'Expected Collateral': f"{sp['currency']} {sp['mv_local'] * expected_fin:,.2f}",
                 'Actual Collateral': f"{sp['currency']} {sp['margin_col_value']:,.2f}",
@@ -634,18 +634,12 @@ def main():
         
         # Impact summary
         total_col_diff = sum(
-            sp['collateral_sgd'] - sp['mv_local'] * GRADE_FINANCING[get_nearest_grade(sp['grade'])] * st.session_state.fx_rates.get(sp['currency'], 1.0)
+            sp['mv_local'] * GRADE_FINANCING[get_nearest_grade(sp['grade'])] * st.session_state.fx_rates.get(sp['currency'] , 1.0) - sp['collateral_sgd'] 
             for sp in calc['special_positions']
         )
-
-        st.info(
-            f"💡 **Impact**: Special financing adds **S${total_col_diff:,.2f}** more collateral "
-            f"than the grade alone would give. Without this adjustment, the margin call would "
-            f"be overstated."
-        )
-        
+    
         st.info (
-            f"Special financing reduces the collateral the client needs to maintain the position."
+            f"💡 **Impact**: Special financing reduces the collateral the client needs to maintain the position."
             f"Without it, based on the counter's grading, the client would need an additional **S${total_col_diff:,.2f}** in collateral, and the margin call would be higher."
         )
     
@@ -714,8 +708,12 @@ def main():
             st.caption("Columns: Name | Sell Price (local currency) | Qty to Sell")
             
             if sell_selections:
-                total_sell_proceeds = 0
-                total_im_released = 0
+                # total_sell_proceeds = 0
+                # total_im_released = 0
+                # if sell_selections:
+                total_pv_sold = 0
+                total_im_sold = 0
+                total_mm_sold = 0
                 
                 for sel in sell_selections:
                     pos = sel['position']
@@ -723,17 +721,48 @@ def main():
                     price = sel['sell_price']
                     grade_info = get_grade_info(pos['grade'])
                     fx = st.session_state.fx_rates.get(pos['currency'], 1.0)
-                    proceeds = qty * price * fx
-                    im_released = proceeds * (1 - grade_info['im'])
-                    total_sell_proceeds += proceeds
-                    total_im_released += im_released
+                    sell_mv_sgd = qty * price * fx
+                    total_pv_sold += sell_mv_sgd
+                    total_im_sold += sell_mv_sgd * grade_info['im']
+                    total_mm_sold += sell_mv_sgd * grade_info['mm']
                 
-                remaining_mc = calc['margin_call_amount'] - total_sell_proceeds + total_im_released
+                # VBA formulas: shares leave portfolio, cash comes in
+                new_pv = calc['total_pv'] - total_pv_sold
+                new_im = calc['total_im'] - total_im_sold
+                new_mm = calc['total_mm'] - total_mm_sold
+                new_net = st.session_state.net_amount + total_pv_sold  # sell proceeds add to cash
+                new_usable_cash = new_pv - new_im + new_net            # O12
+                new_mc_amount = -(new_pv - new_mm + new_net) if new_usable_cash < 0 else 0  # O9
                 
+                remaining_mc = new_mc_amount
                 if remaining_mc <= 0:
                     st.success(f"✅ **Margin Call FULFILLED!** Client now has usable cash of **S${new_usable_cash:,.2f}**")
                 else:
                     st.error(f"❌ Need to sell more! Remaining MC: S${remaining_mc:,.2f}")
+                # for sel in sell_selections:
+                #     pos = sel['position']
+                #     qty = sel['qty']
+                #     price = sel['sell_price']
+                #     grade_info = get_grade_info(pos['grade'])
+                #     fx = st.session_state.fx_rates.get(pos['currency'], 1.0)
+                #     proceeds = qty * price * fx
+                #     im_released = proceeds * (1 - grade_info['im'])
+                #     total_sell_proceeds += proceeds
+                #     total_im_released += im_released
+                # #TODO: HELP TO CALCULATE THIS TODO
+                # new_usable_cash 
+                 
+            # new_pv = calc['total_pv'] - total_sell_sgd
+            # new_im = calc['total_im'] - total_im_released
+            # new_mm = calc['total_mm'] - total_mm_released
+            # new_net = st.session_state.net_amount + total_sell_sgd + cash_deposit
+            # new_usable_cash = new_pv + new_net -new_im
+            # new_mc_amount = -(new_pv - new_mm + new_net) if new_usable_cash < 0 else 0
+            
+                # remaining_mc = calc['margin_call_amount'] - total_sell_proceeds + total_im_released
+                 
+                
+                
         
         # --- TAB 3: Deposit Shares ---
         with tab_deposit:
@@ -856,6 +885,9 @@ def main():
         is_special_financing = any(p.get('is_special_financing') for p in calc['positions'])
         if is_special_financing:
             st.subheader("💡 Disclaimer for TR, Check with Back Office for more details on Margin Call / Force Selling!")
+        
+            st.divider()
+
         else: 
             col1, col2 = st.columns(2)
             with col1:
