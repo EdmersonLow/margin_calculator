@@ -230,8 +230,12 @@ def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
             continue
 
         currencies.add(currency)
+
+        #NEW FEATURE
         if is_bond_section:
             special_info['is_special'] = False
+
+
         positions.append({
             'section': current_section,
             'type': 'Bond' if is_bond_section else 'Equity',
@@ -638,10 +642,10 @@ def main():
         )
         
         # Impact summary
-        total_col_diff = sum(
+        total_col_diff = abs(sum(
             sp['mv_local'] * GRADE_FINANCING[get_nearest_grade(sp['grade'])] * st.session_state.fx_rates.get(sp['currency'] , 1.0) - sp['collateral_sgd'] 
             for sp in calc['special_positions']
-        )
+        ))
     
         st.info (
             f"💡 **Impact**: Special financing reduces the collateral the client needs to maintain the position."
