@@ -1,2 +1,7 @@
 test.py
 archive.py
+
+# Client data — never commit
+*.xlsx
+*.xls
+ScripPositions*
