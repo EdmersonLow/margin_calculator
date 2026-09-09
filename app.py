@@ -635,7 +635,7 @@ def main():
             })
         
         st.dataframe(
-            pd.DataFrame(special_data).style.applymap(
+            pd.DataFrame(special_data).style.map(
                 lambda _: 'background-color: #fff3cd', subset=pd.IndexSlice[:, :]
             ),
             use_container_width=True, hide_index=True
