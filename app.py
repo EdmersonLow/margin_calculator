@@ -15,6 +15,12 @@ RULES:
 - Use Previous Day Closing Price for ALL margin calculations
 - V Account: detect special financing where grade ≠ actual collateral
 
+LIVE WHAT-IF:
+- Position table is editable: change Grade / Price per counter and the whole dashboard recalculates
+- New Order Simulator: add buy / sell orders (qty × price ± brokerage). Buys deduct cash from
+  Net Amount and add a pending position (consuming buying power); sells reduce the holding and
+  add the net proceeds back to cash
+
 VBA FORMULAS:
 - Usable Cash (O12) = Portfolio Value - IM + Net Amount
 - Margin Call? (O8) = IF(Usable Cash < 0, "Yes", "No")
@@ -142,6 +148,119 @@ def detect_special_financing(grade_pct: int, prev_close: float, total_qty: int,
         'actual_value': actual,
         'check_type': 'collateral' if is_v_account else 'IM',
     }
+
+# =============================================================================
+# LIVE WHAT-IF HELPERS (grade / price overrides + new orders)
+# =============================================================================
+
+GRADE_LEVELS = [80, 70, 50, 30, 0]
+GRADE_OPTION_NAMES = [GRADES[g]['name'] for g in GRADE_LEVELS]
+GRADE_NAME_TO_PCT = {GRADES[g]['name']: g for g in GRADE_LEVELS}
+
+
+def apply_overrides(base_positions: list, overrides: dict) -> list:
+    """
+    Return a copy of the parsed positions with live grade / price overrides applied.
+
+    overrides: {position_index: {'grade': int, 'price': float}}
+    - A grade override means "treat this counter as that grade", so the counter is valued
+      with the normal grade-based IM/MM/FM (special financing is switched off for it).
+    - A price override replaces the Prev Day Close used for margin (stress % still applies on top).
+    """
+    result = []
+    for i, base in enumerate(base_positions):
+        pos = dict(base)
+        pos['file_grade'] = base['grade']
+        pos['file_price'] = base['prev_close']
+        pos['grade_overridden'] = False
+        pos['price_overridden'] = False
+        ov = overrides.get(i, {})
+        if 'grade' in ov and get_nearest_grade(ov['grade']) != get_nearest_grade(base['grade']):
+            pos['grade'] = ov['grade']
+            pos['grade_overridden'] = True
+            pos['is_special_financing'] = False
+        if 'price' in ov and ov['price'] > 0 and abs(ov['price'] - base['prev_close']) > 1e-9:
+            pos['price_used'] = ov['price']
+            pos['price_overridden'] = True
+        result.append(pos)
+    return result
+
+
+def order_cost(order: dict, fx_rates: dict) -> dict:
+    """
+    Cash effect of an order. Brokerage = max(order value × %, minimum).
+    BUY : cash out = value + fee   -> net_cash_sgd > 0
+    SELL: cash in  = value - fee   -> net_cash_sgd < 0 (cash comes back)
+    """
+    fx = fx_rates.get(order['currency'], DEFAULT_FX.get(order['currency'], 1.0))
+    value_local = order['qty'] * order['avg_price']
+    fee_local = max(value_local * order['fee_pct'] / 100.0, order['min_fee'])
+    is_sell = order.get('side') == 'SELL'
+    net_local = -(value_local - fee_local) if is_sell else (value_local + fee_local)
+    return {
+        'fx': fx,
+        'value_local': value_local,
+        'fee_local': fee_local,
+        'value_sgd': value_local * fx,
+        'fee_sgd': fee_local * fx,
+        'total_sgd': abs(net_local) * fx,   # gross cash moved: out for buys, in for sells
+        'net_cash_sgd': net_local * fx,     # signed: +out (buy) / -in (sell)
+    }
+
+
+def apply_sell_orders(file_positions: list, orders: list) -> list:
+    """
+    Reduce holdings by pending SELL orders (matched by position index). Quantity never goes below 0.
+    Rows are kept (with qty 0 if fully sold) so table row indices stay stable.
+    """
+    sold = {}
+    for o in orders:
+        if o.get('side') == 'SELL':
+            sold[o['pos_index']] = sold.get(o['pos_index'], 0) + int(o['qty'])
+    if not sold:
+        return file_positions
+    result = []
+    for i, p in enumerate(file_positions):
+        q = dict(p)
+        if i in sold and q['effective_qty'] > 0:
+            original = q['effective_qty']
+            remaining = max(0, original - sold[i])
+            q['effective_qty'] = remaining
+            q['pending_sell_qty'] = original - remaining
+            # collateral / IM in the file covers the full holding: scale it pro-rata with what is left
+            q['margin_col_value'] = q['margin_col_value'] * remaining / original
+        result.append(q)
+    return result
+
+
+def order_to_position(order: dict) -> dict:
+    """
+    Represent a pending buy order as a portfolio position so it flows through calculate_margin.
+    Valued at its mark price (defaults to the avg/fill price; editable in the position table).
+    """
+    mark = order.get('mark_price') or order['avg_price']
+    return {
+        'section': 'ORDER', 'type': 'Order',
+        'name': order['name'], 'code': order['code'],
+        'grade': order['grade'],
+        'qty_on_hand': 0, 'unsettled_purch': int(order['qty']), 'unsettled_sales': 0,
+        'effective_qty': int(order['qty']),
+        'currency': order['currency'],
+        'prev_close': mark, 'current_price': mark, 'price_used': mark,
+        'margin_col_value': 0.0,
+        'is_special_financing': False,
+        'actual_financing_pct': 0, 'expected_financing_pct': 0,
+        'is_order': True, 'order_id': order['id'],
+        'file_grade': order['grade'], 'file_price': order['avg_price'],
+        'grade_overridden': False,
+        'price_overridden': abs(mark - order['avg_price']) > 1e-9,
+    }
+
+
+def new_order_id() -> int:
+    st.session_state.order_seq += 1
+    return st.session_state.order_seq
+
 
 def parse_scrip_positions(uploaded_file, is_v_account: bool = False) -> tuple:
     """
@@ -272,6 +391,7 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
         usable_cash = net_amount
         return {
             'positions': [], 'special_positions': [],
+            'net_amount': net_amount,
             'total_pv': 0, 'total_im': 0, 'total_mm': 0, 'total_fm': 0,
             'usable_cash': usable_cash,
             'is_margin_call': usable_cash < 0,
@@ -382,6 +502,7 @@ def calculate_margin(price_change_pct: float, positions: list, net_amount: float
     
     return {
         'positions': calc_positions,
+        'net_amount': net_amount,
         'special_positions': special_positions,
         'total_pv': total_pv, 'total_im': total_im,
         'total_mm': total_mm, 'total_fm': total_fm,
@@ -409,7 +530,7 @@ def simulate_purchase(calc: dict, purchases: dict, fx_rates: dict) -> dict:
     
     new_total_im = calc['total_im'] + new_im
     new_total_pv = calc['total_pv'] + total_purchase
-    new_net_amount = st.session_state.net_amount - total_purchase
+    new_net_amount = calc['net_amount'] - total_purchase
     new_usable_cash = new_total_pv - new_total_im + new_net_amount
     
     return {
@@ -438,7 +559,7 @@ def simulate_transfer(calc: dict, transfers: list, fx_rates: dict) -> dict:
     
     new_total_pv = calc['total_pv'] - total_mv_out
     new_total_im = calc['total_im'] - total_im_out
-    new_usable_cash = new_total_pv - new_total_im + st.session_state.net_amount
+    new_usable_cash = new_total_pv - new_total_im + calc['net_amount']
     
     return {
         'total_mv_out': total_mv_out,
@@ -465,9 +586,21 @@ def main():
         ('fx_rates', DEFAULT_FX.copy()),
         ('net_amount', 0.0), ('credit_limit', 100000.0),
         ('is_v_account', False),
+        # live what-if state
+        ('base_positions', []), ('overrides', {}), ('editor_version', 0), ('file_sig', None),
+        ('orders', []), ('order_seq', 0),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
+
+    # Clear the new-order form after an order was added (must happen before the widgets render)
+    if st.session_state.pop('_clear_order_form', False):
+        st.session_state['order_name'] = ''
+        st.session_state['order_code'] = ''
+        st.session_state['order_qty'] = 0
+        st.session_state['order_price'] = 0.0
+        for k in [k for k in st.session_state.keys() if str(k).startswith('order_sell_qty_')]:
+            st.session_state[k] = 0
     
     # ==========================================================================
     # SIDEBAR
@@ -487,10 +620,19 @@ def main():
         st.session_state.is_v_account = is_v_account
         
         if uploaded:
-            positions, currencies = parse_scrip_positions(uploaded, is_v_account)
+            # Parse only when a new file (or account type) arrives, so live overrides survive reruns
+            file_sig = (uploaded.file_id, is_v_account)
+            if file_sig != st.session_state.file_sig:
+                positions, currencies = parse_scrip_positions(uploaded, is_v_account)
+                if positions:
+                    st.session_state.base_positions = positions
+                    st.session_state.positions = positions
+                    st.session_state.currencies = currencies
+                    st.session_state.overrides = {}          # new file -> drop live overrides
+                    st.session_state.editor_version += 1
+                    st.session_state.file_sig = file_sig
+            positions = st.session_state.base_positions
             if positions:
-                st.session_state.positions = positions
-                st.session_state.currencies = currencies
                 equities = len([p for p in positions if p['type'] == 'Equity'])
                 bonds = len([p for p in positions if p['type'] == 'Bond'])
                 special_count = len([p for p in positions if p.get('is_special_financing')])
@@ -520,7 +662,7 @@ def main():
         st.divider()
         
         st.subheader("💱 FX Rates (to SGD)")
-        all_currencies = st.session_state.currencies
+        all_currencies = set(st.session_state.currencies) | {o['currency'] for o in st.session_state.orders}
         for curr in sorted(all_currencies):
             if curr == 'SGD':
                 st.text("SGD/SGD: 1.0000 (fixed)")
@@ -555,19 +697,74 @@ def main():
     # ==========================================================================
     # MAIN CONTENT
     # ==========================================================================
-    if not st.session_state.positions:
+    if not st.session_state.base_positions:
         st.info("👈 Upload your ScripPositions.xlsx file to begin")
         return
-    
+
+    # --- Live what-if: absorb Grade / Price edits made in the position table on the last run ---
+    buy_orders = [o for o in st.session_state.orders if o.get('side', 'BUY') != 'SELL']
+    editor_key = f"pos_editor_{st.session_state.editor_version}"
+    editor_state = st.session_state.get(editor_key)
+    if editor_state and editor_state.get('edited_rows'):
+        n_file = len(st.session_state.base_positions)
+        for row_idx, changes in editor_state['edited_rows'].items():
+            i = int(row_idx)
+            new_grade = GRADE_NAME_TO_PCT.get(changes['Grade']) if 'Grade' in changes else None
+            new_price = changes.get('Price')
+            new_price = float(new_price) if new_price is not None and float(new_price) > 0 else None
+            if i < n_file:
+                ov = st.session_state.overrides.setdefault(i, {})
+                if new_grade is not None:
+                    ov['grade'] = new_grade
+                if new_price is not None:
+                    ov['price'] = new_price
+            elif i - n_file < len(buy_orders):
+                order = buy_orders[i - n_file]
+                if new_grade is not None:
+                    order['grade'] = new_grade
+                if new_price is not None:
+                    order['mark_price'] = new_price
+        st.session_state.editor_version += 1  # edits are baked in; render a fresh editor
+
+    base_with_overrides = apply_overrides(st.session_state.base_positions, st.session_state.overrides)
+    file_positions = apply_sell_orders(base_with_overrides, st.session_state.orders)   # pending sells reduce holdings
+    st.session_state.positions = file_positions
+    order_positions = [order_to_position(o) for o in buy_orders]                        # pending buys add positions
+    order_costs = [order_cost(o, st.session_state.fx_rates) for o in st.session_state.orders]
+    net_order_cash = sum(c['net_cash_sgd'] for c in order_costs)   # +cash out (buys) / -cash in (sells)
+    effective_net = st.session_state.net_amount - net_order_cash
+
     calc = calculate_margin(
         st.session_state.price_change_pct,
-        st.session_state.positions,
+        file_positions + order_positions,
+        effective_net,
+        st.session_state.credit_limit,
+        st.session_state.fx_rates,
+        st.session_state.is_v_account,
+    )
+    # Same account without the pending orders (for before / after comparisons)
+    calc_no_orders = calc if not st.session_state.orders else calculate_margin(
+        st.session_state.price_change_pct,
+        base_with_overrides,
         st.session_state.net_amount,
         st.session_state.credit_limit,
         st.session_state.fx_rates,
         st.session_state.is_v_account,
     )
-    
+    # Baseline straight from the uploaded file: no overrides, no orders, 0% stress (drives the deltas in the summary)
+    calc_file = calculate_margin(
+        0.0,
+        st.session_state.base_positions,
+        st.session_state.net_amount,
+        st.session_state.credit_limit,
+        st.session_state.fx_rates,
+        st.session_state.is_v_account,
+    )
+
+    def _delta(now: float, base: float):
+        """Delta label for st.metric vs. the uploaded file; None hides the arrow when nothing changed."""
+        return f"{now - base:+,.2f} vs file" if abs(now - base) > 0.005 else None
+
     # STATUS BANNER
     if calc['is_margin_call']:
         st.error(f"🚨 **MARGIN CALL** — Amount Required: **S${calc['margin_call_amount']:,.2f}**")
@@ -580,36 +777,333 @@ def main():
     st.subheader("📊 Account Summary")
     col1, col3 = st.columns(2)
     with col1:
-        st.metric("Portfolio Value", f"S${calc['total_pv']:,.2f}")
-        st.metric("Initial Margin", f"S${calc['total_im']:,.2f}")
+        st.metric("Portfolio Value", f"S${calc['total_pv']:,.2f}",
+                  delta=_delta(calc['total_pv'], calc_file['total_pv']))
+        st.metric("Initial Margin", f"S${calc['total_im']:,.2f}",
+                  delta=_delta(calc['total_im'], calc_file['total_im']), delta_color="inverse")
     with col3:
-        st.metric("Available Cash (w/o Margin)", f"S${calc['usable_cash']:,.2f}")
-        st.metric("Available Cash / Buying Power (with Margin)", f"S${calc['buying_power']:,.2f}")
-    
-    # POSITIONS TABLE
-    st.subheader("📋 Position Details")
-    if calc['positions']:
-        pos_df = pd.DataFrame(calc['positions'])
-        display_df = pos_df[['type', 'name', 'code', 'grade', 'grade_name',
-                             'effective_qty', 'prev_close', 'currency', 'mv_sgd']].copy()
-        display_df.columns = ['Type', 'Name', 'Code', 'Grade', 'Grade/Financing',
-                              'Qty', 'Prev Close', 'Curr', 'MV (SGD)']
-        display_df['Grade'] = display_df['Grade'].apply(lambda x: f"{x}%")
-
-        # Highlight special financing rows
-        def highlight_special(row):
-            if 'Special' in str(row['Grade/Financing']):
-                return ['background-color: #fff3cd'] * len(row)
-            return [''] * len(row)
-
-        st.dataframe(
-            display_df.style
-                .format({'Qty': '{:,.0f}', 'Prev Close': '{:.4f}', 'MV (SGD)': 'S${:,.2f}'})
-                .apply(highlight_special, axis=1),
-            use_container_width=True, hide_index=True
+        st.metric("Available Cash (w/o Margin)", f"S${calc['usable_cash']:,.2f}",
+                  delta=_delta(calc['usable_cash'], calc_file['usable_cash']),
+                  help="Usable Cash = Portfolio Value − Initial Margin + Net Amount")
+        st.metric("Available Cash / Buying Power (with Margin)", f"S${calc['buying_power']:,.2f}",
+                  delta=_delta(calc['buying_power'], calc_file['buying_power']),
+                  help="Buying Power = MIN(Usable Cash, Net Amount + Credit Limit). "
+                       "When Usable Cash is above the credit limit, this stays pinned at the limit "
+                       "and price / grade changes will not move it.")
+        if calc['credit_capped']:
+            st.caption(
+                f"🔒 Pinned at the credit limit (Net Amount + Credit Limit = S\\${calc['available_buy_limit']:,.2f}). "
+                f"Usable Cash is S\\${calc['usable_cash']:,.2f}, so price / grade changes show up there, not here. "
+                f"Raise the Credit Limit in the sidebar to see the full effect."
+            )
+    if st.session_state.orders:
+        cash_word = "net cash out" if net_order_cash >= 0 else "net cash in"
+        st.caption(
+            f"🧾 Includes **{len(st.session_state.orders)} pending order(s)** with {cash_word} of "
+            f"**S\\${abs(net_order_cash):,.2f}** (incl. brokerage). Net Amount used: **S\\${effective_net:,.2f}** "
+            f"(was S\\${st.session_state.net_amount:,.2f})."   # backslash-dollar stops markdown treating $...$ as LaTeX
         )
     
+    # POSITIONS TABLE (editable — live what-if on Grade / Price)
+    st.subheader("📋 Position Details")
+    st.caption(
+        "✏️ **Live what-if:** double-click a **Grade** or **Price** cell, type the new value, then press **Enter** "
+        "(or Tab, or click outside the table) to apply — the summary above shows the change vs. the uploaded file. "
+        "Price is the Prev Day Close used for margin (the stress-test % is applied on top). "
+        "Overriding a grade treats the counter as that grade (special financing is switched off for it). "
+        "For **Order** rows, Price is the mark price used for valuation; the fill price stays in the order."
+    )
+    if calc['positions']:
+        rows = []
+        for cp in calc['positions']:
+            if cp.get('is_order'):
+                note = "🧾 pending order" + (" · re-marked" if cp.get('price_overridden') else "")
+            else:
+                flags = []
+                if cp.get('grade_overridden'):
+                    flags.append(f"grade {cp['file_grade']}% → {cp['grade']}%")
+                if cp.get('price_overridden'):
+                    flags.append(f"price {cp['file_price']:.4f} → {cp['price_used']:.4f}")
+                if cp.get('is_special_financing'):
+                    flags.append("⚡ special financing")
+                if cp.get('pending_sell_qty'):
+                    flags.append(f"🧾 pending sell −{cp['pending_sell_qty']:,}")
+                note = " · ".join(flags)
+            rows.append({
+                'Type': cp['type'],
+                'Name': cp['name'],
+                'Code': cp['code'],
+                'Curr': cp['currency'],
+                'Qty': f"{cp['effective_qty']:,}",
+                'Grade': GRADES[get_nearest_grade(cp['grade'])]['name'],
+                'Price': float(cp['price_used']),
+                'Financing': cp['grade_name'],
+                'MV (SGD)': f"S${cp['mv_sgd']:,.2f}",
+                'IM (SGD)': f"S${cp['im_sgd']:,.2f}",
+                'Notes': note,
+            })
+        editor_key = f"pos_editor_{st.session_state.editor_version}"
+        st.data_editor(
+            pd.DataFrame(rows),
+            key=editor_key,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                'Type': st.column_config.TextColumn('Type', width='small'),
+                'Name': st.column_config.TextColumn('Name', width='medium'),
+                'Code': st.column_config.TextColumn('Code', width='small'),
+                'Curr': st.column_config.TextColumn('Curr', width='small'),
+                'Qty': st.column_config.TextColumn('Qty', width='small'),
+                'Grade': st.column_config.SelectboxColumn(
+                    '✏️ Grade', options=GRADE_OPTION_NAMES, required=True,
+                    help='Change to simulate a re-grading of this counter'),
+                'Price': st.column_config.NumberColumn(
+                    '✏️ Price', min_value=0.0, step=0.0001, format='%.4f', required=True,
+                    help='Price used for margin (local currency, before stress-test %). Edit to simulate a price move.'),
+                'Financing': st.column_config.TextColumn('Grade/Financing'),
+                'MV (SGD)': st.column_config.TextColumn('MV (SGD)'),
+                'IM (SGD)': st.column_config.TextColumn('IM (SGD)'),
+                'Notes': st.column_config.TextColumn('Overrides / Notes', width='large'),
+            },
+            disabled=['Type', 'Name', 'Code', 'Curr', 'Qty', 'Financing', 'MV (SGD)', 'IM (SGD)', 'Notes'],
+        )
+        n_overridden = sum(1 for p in file_positions if p['grade_overridden'] or p['price_overridden'])
+        n_remarked = sum(1 for o in st.session_state.orders if o.get('mark_price'))
+        if n_overridden or n_remarked:
+            c_reset, c_info = st.columns([1, 4])
+            with c_reset:
+                if st.button("↩️ Reset to file values", key="reset_overrides"):
+                    st.session_state.overrides = {}
+                    for o in st.session_state.orders:
+                        o.pop('mark_price', None)
+                    st.session_state.editor_version += 1
+                    st.rerun()
+            with c_info:
+                st.caption(
+                    f"{n_overridden} counter(s) overridden"
+                    + (f", {n_remarked} order(s) re-marked" if n_remarked else "")
+                    + " — values differ from the uploaded file."
+                )
+
     # ==========================================================================
+    # NEW ORDER SIMULATOR (pending buy orders consume cash / buying power)
+    # ==========================================================================
+    st.divider()
+    st.subheader("🧾 New Order Simulator")
+    st.caption(
+        "Add a **buy** or **sell** order to see how it changes cash / buying power. "
+        "**Buy:** cash out (qty × avg price + brokerage) is deducted from Net Amount and the shares are added as a "
+        "pending **Order** position. **Sell:** the shares come off the existing holding and the proceeds less "
+        "brokerage are added back to Net Amount. The status banner, Usable Cash and Buying Power above already "
+        "include every order added here."
+    )
+
+    side = st.radio("Order Side", ["Buy", "Sell"], horizontal=True, key="order_side",
+                    help="Buy: cash out, shares added as a pending position. "
+                         "Sell: shares removed from an existing holding, proceeds less brokerage added back to cash.")
+    is_sell = (side == "Sell")
+    draft = None
+
+    if is_sell:
+        pending_sold = {}
+        for o in st.session_state.orders:
+            if o.get('side') == 'SELL':
+                pending_sold[o['pos_index']] = pending_sold.get(o['pos_index'], 0) + int(o['qty'])
+        sellable = [i for i, p in enumerate(base_with_overrides)
+                    if p['effective_qty'] - pending_sold.get(i, 0) > 0]
+        if not sellable:
+            st.info("No holdings left to sell.")
+        else:
+            def _sell_label(i):
+                p = base_with_overrides[i]
+                return f"{p['name']} ({p['code']}) — {p['effective_qty'] - pending_sold.get(i, 0):,} available"
+            sel_idx = st.selectbox("Counter to sell", sellable, format_func=_sell_label, key="order_sell_pos")
+            sel_pos = base_with_overrides[sel_idx]
+            available = sel_pos['effective_qty'] - pending_sold.get(sel_idx, 0)
+            o_grade = get_nearest_grade(sel_pos['grade'])
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            with sc1:
+                o_qty = st.number_input("Quantity", min_value=0, max_value=int(available), step=100, value=0,
+                                        key=f"order_sell_qty_{sel_idx}")
+            with sc2:
+                o_price = st.number_input("Sell Price (local ccy)", min_value=0.0, step=0.01,
+                                          value=float(sel_pos['current_price']), format="%.4f",
+                                          key=f"order_sell_price_{sel_idx}")
+            with sc3:
+                o_fee_pct = st.number_input("Brokerage (%)", min_value=0.0, step=0.01, value=0.28,
+                                            format="%.3f", key="order_sell_fee_pct",
+                                            help="Brokerage as a % of order value")
+            with sc4:
+                o_min_fee = st.number_input("Min Brokerage (local ccy)", min_value=0.0, step=1.0, value=0.0,
+                                            format="%.2f", key="order_sell_min_fee",
+                                            help="Fee = max(order value × %, minimum). Set % to 0 for a flat fee.")
+            st.caption(
+                f"{GRADES[o_grade]['name']} · {sel_pos['currency']} · holding {sel_pos['effective_qty']:,} shares"
+                + (f" · {pending_sold[sel_idx]:,} already in pending sells" if pending_sold.get(sel_idx) else "")
+            )
+            draft = {
+                'id': 0, 'side': 'SELL', 'pos_index': sel_idx,
+                'name': sel_pos['name'], 'code': sel_pos['code'], 'currency': sel_pos['currency'],
+                'grade': o_grade, 'qty': int(o_qty), 'avg_price': float(o_price),
+                'fee_pct': float(o_fee_pct), 'min_fee': float(o_min_fee),
+            }
+    else:
+        currency_options = sorted({'SGD', 'USD', 'HKD'} | set(st.session_state.currencies))
+        oc1, oc2, oc3, oc4 = st.columns([2.5, 1.5, 1, 1.6])
+        with oc1:
+            o_name = st.text_input("Counter Name", key="order_name", placeholder="e.g. DBS GROUP HOLDINGS")
+        with oc2:
+            o_code = st.text_input("Stock Code / Ticker", key="order_code", placeholder="e.g. D05")
+        with oc3:
+            o_curr = st.selectbox("Currency", currency_options,
+                                  index=currency_options.index('SGD') if 'SGD' in currency_options else 0,
+                                  key="order_curr")
+        with oc4:
+            o_grade_name = st.selectbox("Grade", GRADE_OPTION_NAMES, index=1, key="order_grade")
+        oc5, oc6, oc7, oc8 = st.columns(4)
+        with oc5:
+            o_qty = st.number_input("Quantity", min_value=0, step=100, value=0, key="order_qty")
+        with oc6:
+            o_price = st.number_input("Avg Price (local ccy)", min_value=0.0, step=0.01, value=0.0,
+                                      format="%.4f", key="order_price")
+        with oc7:
+            o_fee_pct = st.number_input("Brokerage (%)", min_value=0.0, step=0.01, value=0.28,
+                                        format="%.3f", key="order_fee_pct",
+                                        help="Brokerage as a % of order value")
+        with oc8:
+            o_min_fee = st.number_input("Min Brokerage (local ccy)", min_value=0.0, step=1.0, value=0.0,
+                                        format="%.2f", key="order_min_fee",
+                                        help="Fee = max(order value × %, minimum). Set % to 0 for a flat fee.")
+        draft = {
+            'id': 0, 'side': 'BUY', 'pos_index': None,
+            'name': o_name.strip() or 'NEW ORDER', 'code': o_code.strip().upper(),
+            'currency': o_curr, 'grade': GRADE_NAME_TO_PCT[o_grade_name],
+            'qty': int(o_qty), 'avg_price': float(o_price),
+            'fee_pct': float(o_fee_pct), 'min_fee': float(o_min_fee),
+        }
+
+    if draft is not None and draft['qty'] > 0 and draft['avg_price'] > 0:
+        d_cost = order_cost(draft, st.session_state.fx_rates)
+        d_grade = GRADES[draft['grade']]
+        d_im = d_cost['value_sgd'] * d_grade['im']
+        if is_sell:
+            preview_positions = apply_sell_orders(base_with_overrides, st.session_state.orders + [draft]) + order_positions
+        else:
+            preview_positions = file_positions + order_positions + [order_to_position(draft)]
+        calc_after = calculate_margin(
+            st.session_state.price_change_pct,
+            preview_positions,
+            effective_net - d_cost['net_cash_sgd'],
+            st.session_state.credit_limit,
+            st.session_state.fx_rates,
+            st.session_state.is_v_account,
+        )
+        st.markdown("**Order Preview:**")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Order Value", f"S${d_cost['value_sgd']:,.2f}",
+                  help=f"{draft['currency']} {d_cost['value_local']:,.2f} × FX {d_cost['fx']:.4f}")
+        p2.metric("Brokerage", f"S${d_cost['fee_sgd']:,.2f}",
+                  help=f"{draft['currency']} {d_cost['fee_local']:,.2f}")
+        if is_sell:
+            net_in = -d_cost['net_cash_sgd']   # positive = cash comes in, negative = brokerage exceeds proceeds
+            p3.metric("Net Cash In" if net_in >= 0 else "Net Cash OUT",
+                      f"S${abs(net_in):,.2f}" if net_in >= 0 else f"-S${abs(net_in):,.2f}",
+                      help="Sell proceeds less brokerage. Negative when the brokerage is larger than the proceeds.")
+            p4.metric("IM Released", f"S${d_im:,.2f}",
+                      help=f"{d_grade['name']}: IM {d_grade['im']*100:.0f}% of the shares sold")
+        else:
+            p3.metric("Total Cash Out", f"S${d_cost['total_sgd']:,.2f}", help="Order value + brokerage")
+            p4.metric("IM Required", f"S${d_im:,.2f}",
+                      help=f"{d_grade['name']}: IM {d_grade['im']*100:.0f}% of order value")
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Usable Cash after", f"S${calc_after['usable_cash']:,.2f}",
+                  delta=f"{calc_after['usable_cash'] - calc['usable_cash']:,.2f}",
+                  help="Buy: drops by IM + brokerage. Sell: rises by IM released less brokerage.")
+        q2.metric("Buying Power after", f"S${calc_after['buying_power']:,.2f}",
+                  delta=f"{calc_after['buying_power'] - calc['buying_power']:,.2f}")
+        q3.metric("Available Buy Limit after", f"S${calc_after['available_buy_limit']:,.2f}",
+                  delta=f"{calc_after['available_buy_limit'] - calc['available_buy_limit']:,.2f}",
+                  help="Net Amount + Credit Limit, after the order's cash movement")
+
+        if calc_after['is_margin_call']:
+            st.error(f"❌ This order would leave the account in a **MARGIN CALL** of "
+                     f"S${calc_after['margin_call_amount']:,.2f}")
+        elif not is_sell and d_cost['total_sgd'] > calc['available_buy_limit']:
+            st.warning(f"⚠️ Sufficient margin, but the order exceeds the **Credit Limit** "
+                       f"(max purchase S${calc['available_buy_limit']:,.2f})")
+        elif is_sell and d_cost['fee_sgd'] > d_cost['value_sgd']:
+            st.warning(f"⚠️ Brokerage (S\\${d_cost['fee_sgd']:,.2f}) is larger than the sell proceeds "
+                       f"(S\\${d_cost['value_sgd']:,.2f}) — this sell takes S\\${d_cost['fee_sgd'] - d_cost['value_sgd']:,.2f} "
+                       f"out of the account. Check the Min Brokerage.")
+        elif is_sell and calc_after['usable_cash'] < calc['usable_cash']:
+            st.warning(f"⚠️ Brokerage exceeds the margin released — usable cash drops by "
+                       f"S${calc['usable_cash'] - calc_after['usable_cash']:,.2f}")
+        elif is_sell:
+            st.success("✅ Sell order frees up cash and margin")
+        else:
+            st.success("✅ Order is within buying power and credit limit")
+
+        if st.button("➕ Add Order to Portfolio", type="primary", key="add_order"):
+            draft['id'] = new_order_id()
+            st.session_state.orders.append(draft)
+            if draft['currency'] not in st.session_state.fx_rates:
+                st.session_state.fx_rates[draft['currency']] = DEFAULT_FX.get(draft['currency'], 1.0)
+            st.session_state.editor_version += 1
+            st.session_state._clear_order_form = True
+            st.rerun()
+    elif draft is not None:
+        st.info("Enter a quantity and price to preview the order.")
+
+    if st.session_state.orders:
+        n_file = len(file_positions)
+        st.markdown(f"**Pending Orders ({len(st.session_state.orders)}):**")
+        widths = [0.7, 2.6, 1.4, 1, 1.2, 1.3, 1.1, 1.5, 1.5, 0.6]
+        for col, title in zip(st.columns(widths), ["Side", "Counter", "Grade", "Qty", "Price", "Value (SGD)",
+                                                   "Fee (SGD)", "Net Cash (SGD)", "IM Added / (Released)", ""]):
+            col.markdown(f"**{title}**")
+        remove_idx = None
+        total_order_im = 0.0
+        buy_j = 0
+        for k, (o, c) in enumerate(zip(st.session_state.orders, order_costs)):
+            is_sell_o = o.get('side') == 'SELL'
+            if is_sell_o:
+                im_k = -(c['value_sgd'] * GRADES[o['grade']]['im'])
+            else:
+                im_k = calc['positions'][n_file + buy_j]['im_sgd']
+                buy_j += 1
+            total_order_im += im_k
+            r = st.columns(widths)
+            r[0].text("SELL" if is_sell_o else "BUY")
+            r[1].text(f"{o['name']} ({o['code']})" if o['code'] else o['name'])
+            r[2].text(GRADES[o['grade']]['name'])
+            r[3].text(f"{o['qty']:,}")
+            r[4].text(f"{o['currency']} {o['avg_price']:.4f}")
+            r[5].text(f"S${c['value_sgd']:,.2f}")
+            r[6].text(f"S${c['fee_sgd']:,.2f}")
+            r[7].text(f"S${c['total_sgd']:,.2f} {'in' if c['net_cash_sgd'] < 0 else 'out'}")
+            r[8].text(f"(S${-im_k:,.2f})" if im_k < 0 else f"S${im_k:,.2f}")
+            if r[9].button("🗑️", key=f"rm_order_{o['id']}", help="Remove this order"):
+                remove_idx = k
+        if remove_idx is not None:
+            st.session_state.orders.pop(remove_idx)
+            st.session_state.editor_version += 1
+            st.rerun()
+
+        st.markdown("**Impact of all pending orders (vs. without them):**")
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("Net Cash Out" if net_order_cash >= 0 else "Net Cash In", f"S${abs(net_order_cash):,.2f}",
+                  help="Buys: value + brokerage out. Sells: value − brokerage in.")
+        i2.metric("Net IM Change", f"S${total_order_im:,.2f}", help="IM added by buys less IM released by sells")
+        i3.metric("Usable Cash", f"S${calc['usable_cash']:,.2f}",
+                  delta=f"{calc['usable_cash'] - calc_no_orders['usable_cash']:,.2f}")
+        i4.metric("Buying Power", f"S${calc['buying_power']:,.2f}",
+                  delta=f"{calc['buying_power'] - calc_no_orders['buying_power']:,.2f}")
+        if st.button("🗑️ Clear all orders", key="clear_orders"):
+            st.session_state.orders = []
+            st.session_state.editor_version += 1
+            st.rerun()
+
+# ==========================================================================
     # SPECIAL FINANCING TAB (V Account only)
     # ==========================================================================
     if calc['special_positions']:
@@ -635,7 +1129,7 @@ def main():
             })
         
         st.dataframe(
-            pd.DataFrame(special_data).style.map(
+            pd.DataFrame(special_data).style.applymap(
                 lambda _: 'background-color: #fff3cd', subset=pd.IndexSlice[:, :]
             ),
             use_container_width=True, hide_index=True
@@ -739,7 +1233,7 @@ def main():
                 new_pv = calc['total_pv'] - total_pv_sold
                 new_im = calc['total_im'] - total_im_sold
                 new_mm = calc['total_mm'] - total_mm_sold
-                new_net = st.session_state.net_amount + total_pv_sold  # sell proceeds add to cash
+                new_net = calc['net_amount'] + total_pv_sold  # sell proceeds add to cash
                 new_usable_cash = new_pv - new_im + new_net            # O12
                 new_mc_amount = -(new_pv - new_mm + new_net) if new_usable_cash < 0 else 0  # O9
                 
@@ -871,7 +1365,7 @@ def main():
             new_pv = calc['total_pv'] - total_sell_sgd
             new_im = calc['total_im'] - total_im_released
             new_mm = calc['total_mm'] - total_mm_released
-            new_net = st.session_state.net_amount + total_sell_sgd + cash_deposit
+            new_net = calc['net_amount'] + total_sell_sgd + cash_deposit
             new_usable_cash = new_pv + new_net -new_im
             new_mc_amount = -(new_pv - new_mm + new_net) if new_usable_cash < 0 else 0
             
@@ -901,7 +1395,7 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("📉 Distance to Margin Call")
-                if st.session_state.net_amount >= 0:
+                if calc['net_amount'] >= 0:
                     st.info("💡 No margin call possible — Net Amount is positive")
                 elif calc['mm_ratio'] >= 1:
                     st.info("💡 Portfolio is 100% Grade C — no margin call as long as Net Amount is positive")
@@ -917,7 +1411,7 @@ def main():
             
             with col2:
                 st.subheader("📉 Distance to Force Sell")
-                if st.session_state.net_amount >= 0:
+                if calc['net_amount'] >= 0:
                     st.info("💡 No force sell possible — Net Amount is positive")
                 elif calc['fm_ratio'] >= 1:
                     st.info("💡 Portfolio is 100% Grade C — no force sell as long as Net Amount is positive")
@@ -977,7 +1471,7 @@ def main():
                 st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
             elif result['exceeds_credit']:
                 st.warning("⚠️ You have sufficient buying power but will exceed Credit Limit!")
-                st.caption(f"Total purchase: S${result['total_purchase']:,.2f} > Limit: S${calc['available_buy_limit']:,.2f}")
+                st.caption(f"Total purchase: S\\${result['total_purchase']:,.2f} > Limit: S\\${calc['available_buy_limit']:,.2f}")
             else:
                 st.success("✅ You can purchase these shares!")
                 st.caption(f"New Usable Cash would be: S${result['new_usable_cash']:,.2f}")
