@@ -680,15 +680,15 @@ def main():
         with col_down:
             st.markdown("**📉 Drop**")
             for pct in [-5, -10, -20]:
-                if st.button(f"{pct}%", key=f"stress_{pct}", use_container_width=True):
+                if st.button(f"{pct}%", key=f"stress_{pct}", width="stretch"):
                     st.session_state.price_change_pct = float(pct)
         with col_up:
             st.markdown("**📈 Rise**")
             for pct in [5, 10, 20]:
-                if st.button(f"+{pct}%", key=f"stress_{pct}", use_container_width=True):
+                if st.button(f"+{pct}%", key=f"stress_{pct}", width="stretch"):
                     st.session_state.price_change_pct = float(pct)
 
-        if st.button("🔄 Reset to 0%", use_container_width=True):
+        if st.button("🔄 Reset to 0%", width="stretch"):
             st.session_state.price_change_pct = 0.0
             
         color = "#ef4444" if st.session_state.price_change_pct < 0 else "#22c55e" if st.session_state.price_change_pct > 0 else "#64748b"
@@ -1129,10 +1129,10 @@ def main():
             })
         
         st.dataframe(
-            pd.DataFrame(special_data).style.applymap(
+            pd.DataFrame(special_data).style.map(
                 lambda _: 'background-color: #fff3cd', subset=pd.IndexSlice[:, :]
             ),
-            use_container_width=True, hide_index=True
+            width="stretch", hide_index=True
         )
         
         # Impact summary
@@ -1177,7 +1177,7 @@ def main():
                 sell_amt = calc['margin_call_amount'] * info['sell']
                 sell_ref.append({'Grade': info['name'], 'Multiplier': f"{info['sell']}x",
                                  'Min Sell Amount': f"S${sell_amt:,.2f}"})
-            st.dataframe(pd.DataFrame(sell_ref), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(sell_ref), width="stretch", hide_index=True)
             
             st.divider()
             st.markdown("**🔧 Sell Simulator**")
@@ -1279,7 +1279,7 @@ def main():
                     dep_data.append({
                         'Grade': info['name'], 'Multiplier': f"{info['deposit']}x",
                         'Min Deposit': f"S${info['deposit'] * calc['margin_call_amount']:,.2f}"})
-            st.dataframe(pd.DataFrame(dep_data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(dep_data), width="stretch", hide_index=True)
         
         # --- TAB 4: Combined Cash + Sell ---
         with tab_combined:
@@ -1359,7 +1359,7 @@ def main():
             
             if sell_breakdown:
                 st.markdown("**Sell Breakdown:**")
-                st.dataframe(pd.DataFrame(sell_breakdown), use_container_width=True,
+                st.dataframe(pd.DataFrame(sell_breakdown), width="stretch",
                              hide_index=True)
             
             new_pv = calc['total_pv'] - total_sell_sgd
@@ -1439,7 +1439,7 @@ def main():
             max_buy = base_cash * info['purchase']
             purchase_data.append({'Grade': info['name'], 'Multiplier': f"{info['purchase']}x",
                                   'Max Purchase': f"S${max_buy:,.2f}"})
-        st.dataframe(pd.DataFrame(purchase_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(purchase_data), width="stretch", hide_index=True)
         
         st.divider()
         
